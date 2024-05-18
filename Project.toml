@@ -1,4 +1,4 @@
-name = "MyelinFields"
+name = "SimulatedFields"
 uuid = "0529d27c-f791-481a-86da-3eca3bf9b8a7"
 authors = ["Jonathan Doucette <jdoucette@physics.ubc.ca>"]
 version = "0.1.0"

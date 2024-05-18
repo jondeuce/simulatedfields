@@ -1,8 +1,8 @@
 using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
 
-using MyelinFields
-using MyelinFields: Circle, outer_circle, centre
+using SimulatedFields
+using SimulatedFields: Circle, centre, inner_circle, outer_circle
 
 using CairoMakie
 using Dates
@@ -33,7 +33,7 @@ function rand_nonoverlapping_annulii(p::TissueParameters{T}; n = 10, width = 2.0
         any(isoverlapping(annulii[i], annulii[j]) for i in 1:n for j in i+1:n) && continue
         density = mean(1:10_000) do i
             x = SA[rand(Uniform(-T(width) / 2, T(width) / 2)), rand(Uniform(-T(width) / 2, T(width) / 2))]
-            return any(x ∈ MyelinFields.outer_circle(annulus) for annulus in annulii)
+            return any(x ∈ outer_circle(annulus) for annulus in annulii)
         end
         density < 0.65 && continue
         return annulii

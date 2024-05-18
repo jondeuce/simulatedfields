@@ -1,4 +1,4 @@
-module MyelinFields
+module SimulatedFields
 
 using Parameters: @with_kw
 using StaticArrays: SVector
@@ -324,4 +324,4 @@ function omega(x::AbstractVector{T}, y::AbstractVector{T}, p::TissueParameters{T
     return ω
 end
 
-end # module MyelinFields
+end # module SimulatedFields
