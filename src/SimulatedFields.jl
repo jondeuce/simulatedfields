@@ -6,18 +6,18 @@ using LinearAlgebra: ⋅, dot, norm
 
 export BloodVesselDomain, MyelinDomain, TissueParameters
 export Annulus, Circle, isoverlapping
-export omega
+export omegamap, t1map, t2map, regionmap, mapdomain, findregion, regiondict
 
-# ---------------------------------------------------------------------------- #
-# TissueParameters
-#   Physical parameters for calculating frequency maps
-# ---------------------------------------------------------------------------- #
+####
+#### TissueParameters
+####    Physical parameters for calculating frequency maps, relataion maps, etc.
+####
 
 @with_kw struct TissueParameters{T <: AbstractFloat}
     B0::T              = T(3.0) # ............................................ [T]          External magnetic field (z-direction)
     gamma::T           = T(2.67515255e8) # ................................... [rad/s/T]    Gyromagnetic ratio
     theta::T           = T(π) / 2 # .......................................... [rad]        Main magnetic field angle w.r.t B0
-    R1_sp::T           = T(inv(200e-3)) # .................................... [1/s]        1/T1 relaxation rate of small pool (myelin) water [REF: TODO]
+    R1_sp::T           = T(inv(115.6e-3)) # .................................. [1/s]        1/T1 relaxation rate of small pool (myelin) water [REF: mean of measurements with B0 = 3T, TIₙ = 8s in Table 2 of Labadie C, Lee J-H, Rooney WD, et al. Myelin water mapping by spatially regularized longitudinal relaxographic imaging at high magnetic fields. Magnetic Resonance in Medicine 2014; 71: 375–387.]
     R1_lp::T           = T(inv(1084e-3)) # ................................... [1/s]        1/T1 relaxation rate of large pool (intra-cellular/axonal) water [REF: 1084 ± 45; https://www.ncbi.nlm.nih.gov/pubmed/16086319]
     R1_Tissue::T       = T(R1_lp) # .......................................... [1/s]        1/T1 relaxation rate of white matter tissue (extra-cellular water)
     R1_Blood::T        = T(inv(1649e-3)) # ....................................[1/s]        1/T1 relaxation rate of blood [REF: 1649 ± 68; https://doi.org/10.1002/mrm.24550]
@@ -49,7 +49,8 @@ export omega
     MyelinChiI::T      = T(-60e-9) # ......................................... [T/T]        Isotropic susceptibility of myelin; Wharton and Bowtell 2012 find -60 ppb ± 20 ppb in Table 2, Xu et al. 2017 use the same value.
     MyelinChiA::T      = T(-140e-9) # ........................................ [T/T]        Anisotropic Susceptibility of myelin; Wharton and Bowtell 2012 find -140 ppb ± 20 ppb in Table 2, Xu et al. 2017 use a slightly different value of -120 ppb.
     MyelinChiE::T      = T(0.0) # ............................................ [T/T]        Exchange component to resonance freqeuency; we default to 0.0, but Wharton and Bowtell 2012 find 20 ppb ± 10 ppb and 50 ppb ± 10 ppb in Table 2.
-    R2_Fe::T           = T(inv(1e-6)) # ...................................... [1/s]        Relaxation rate of iron in ferritin (assumed extremely high)
+    R2_Fe::T           = T(inv(1e-6)) # ...................................... [1/s]        R2 relation rate of iron in ferritin (assumed extremely high) #TODO Ref
+    R1_Fe::T           = T(inv(1e-6)) # ...................................... [1/s]        R1 relation rate of iron in ferritin (assumed extremely high) #TODO Ref
     R_Ferritin::T      = T(4.0e-3) # ......................................... [um]         Ferritin mean radius
     Fe_Conc::T         = T(0.0424) # ......................................... [g/g]        TODO: (check units) Concentration of iron in the frontal white matter (0.0424 in frontal WM; 0.2130 in globus pallidus deep grey matter)
     Rho_Tissue::T      = T(1.073) # .......................................... [g/ml]       White matter tissue density
@@ -64,9 +65,11 @@ export omega
     dR2a_Blood::T      = T(11 + 125 * (1 - Ya_Blood)^2) # .................... [1/s]        Increase in R2 in arterial blood relative to tissue [REF: Zhao et al., 2007]
     dChiv_Blood::T     = T(2.26e-6 * Hct_Blood * (1 - Yv_Blood)) # ........... [T/T]        Increase in susceptibility in venous blood relative to tissue
     dChia_Blood::T     = T(2.26e-6 * Hct_Blood * (1 - Ya_Blood)) # ........... [T/T]        Increase in susceptibility in arterial blood relative to tissue
-    # CA_Blood::T      = T(0.0) # ............................................ [mM]         Contrast Agent concentration
-    # dR2_CA_Blood::T  = T(5.2) # ............................................ [Hz/mM]      Relaxation constant of the CA
-    # dChi_CA_Blood::T = T(0.3393e-6) # ...................................... [T/T/mM]     Susceptibility CA
+    CA_Blood::T        = T(0.0) # ............................................ [mM]         Contrast Agent concentration
+    dR2_CA_Blood::T    = T(5.2) # ............................................ [Hz/mM]      Relaxation constant of the CA
+    dChi_CA_Blood::T   = T(0.3393e-6) # ...................................... [T/T/mM]     Susceptibility CA
+    R2v_Blood::T       = T(dR2v_Blood + CA_Blood * dR2_CA_Blood) # ........... [1/s]        R2 in venous blood
+    R2a_Blood::T       = T(dR2a_Blood + CA_Blood * dR2_CA_Blood) # ........... [1/s]        R2 in arterial blood
 
     # Constraints on parameters
     @assert B0 == 3.0 "Tissue parameters are only valid for B0 = 3.0 T"
@@ -81,6 +84,12 @@ export omega
 end
 
 Base.Dict(p::TissueParameters{T}) where {T} = Dict{String, T}(string(k) => getfield(p, k) for k in fieldnames(typeof(p)))
+
+####
+#### Geometry utils
+####
+
+liftdim(x::SVector{dim, T}) where {dim, T} = SVector{dim + 1, T}(x..., zero(T))
 
 @with_kw struct Circle{dim, T}
     centre::SVector{dim, T}
@@ -117,20 +126,80 @@ end
     return dx ⋅ dx <= (outer_radius(a) + outer_radius(b) - thresh)^2
 end
 
-struct MyelinDomain{T}
+####
+#### Domain partitions
+####
+
+abstract type AbstractDomain{T} end
+
+struct MyelinDomain{T} <: AbstractDomain{T}
     annulii::Vector{Annulus{2, T}}
-    ferritins::Vector{Circle{3, T}}
+    spheres::Vector{Circle{3, T}}
 end
 
-struct BloodVesselDomain{T}
+struct BloodVesselDomain{T} <: AbstractDomain{T}
     circles::Vector{Circle{2, T}}
 end
 
-@enum Region AxonRegion BloodRegion MyelinRegion TissueRegion
+@enum Region TissueRegion BloodRegion MyelinRegion AxonRegion FerritinRegion
 
-# ---------------------------------------------------------------------------- #
-# Local frequency perturbation map functions
-# ---------------------------------------------------------------------------- #
+regiondict() = Dict{String, Int}(string(r) => Int(r) for r in [AxonRegion, BloodRegion, MyelinRegion, TissueRegion, FerritinRegion])
+
+findregion(x::T, y::T, domain::AbstractDomain{T}) where {T} = findregion(SVector{2, T}((x, y)), domain)
+
+function findregion(x::SVector{2, T}, domain::BloodVesselDomain{T}) where {T}
+    # Find the region that `x` is in
+    (; circles) = domain
+    i_inner = findfirst(c -> x ∈ c, circles)
+
+    region = i_inner !== nothing ?
+        BloodRegion : # in circle -> blood region
+        TissueRegion # not in circle -> tissue region
+
+    return region
+end
+
+function findregion(x::SVector{2, T}, domain::MyelinDomain{T}) where {T}
+    # Find the region that `x` is in
+    (; annulii, spheres) = domain
+
+    # Find the region that `x` is in
+    i_sphere = findfirst(c -> liftdim(x) ∈ c, spheres)
+    i_outer = findfirst(c -> x ∈ outer_circle(c), annulii)
+    i_inner = findfirst(c -> x ∈ inner_circle(c), annulii)
+
+    region = if i_sphere !== nothing
+        FerritinRegion # in sphere -> ferritin region (NOTE: FerritinRegion is contained within other regions)
+    elseif i_outer === nothing
+        @assert i_inner === nothing "Point is outside outer circles but inside an inner circle"
+        TissueRegion # not in outer circles -> tissue region
+    elseif i_inner !== nothing
+        @assert i_outer == i_inner "Inner and outer circles are not corresponding"
+        AxonRegion # in inner circles -> axon region
+    else
+        MyelinRegion # in outer circles but not inner circles -> myelin region
+    end
+
+    return region
+end
+
+####
+#### Local frequency perturbation map functions
+####
+
+# Notation mapping from the horribly confusing notation in [1]:
+#
+#   - B field in x-direction (at θ = 0°) -> B field in z-direction (at θ = 0°)
+#   - Cylinder in x-direction -> cylinder in z-direction
+#   - y-z plane perpendicular to cylinder -> x-y plane perpendicular to cylinder
+#   - Cartesian coordinates (z, y, x) -> (x, y, z) (not entirely sure about this...)
+#   - ρ² = y² + z² -> ρ² = x² + y²
+#   - θ = angle between cylinder and B-field -> same θ here
+#   - θ3D = azimuthal angle between y and z -> ϕ3D = azimuthal angle between x and y
+#   - φ = 2D polar angle between y and z -> ϕ = 2D polar angle between x and y
+#
+# [1] Cheng Y-CN, Neelavalli J, Haacke EM. Limitations of Calculating Field Distributions and Magnetic Susceptibilities in MRI using a Fourier Based Method. Phys Med Biol 2009; 54: 1169–1189
+
 struct OmegaDerivedConstants{T}
     ω₀::T
     s::T
@@ -207,18 +276,19 @@ end
     return zero(T) # no field inside a sphere of constant susceptibility
 end
 
-# ---------------------------------------------------------------------------- #
-# Global frequency perturbation functions: calculate ω(x) due to entire domain
-# ---------------------------------------------------------------------------- #
+####
+#### Global frequency perturbation functions: calculate ω(x) due to entire domain
+####
 
 # Calculate ω(x) by searching for the region which `x` is contained in
-function omega(
+function omegamap(
     x::SVector{2, T},
     p::TissueParameters{T},
-    circles::Vector{Circle{2, T}},
+    domain::BloodVesselDomain{T},
 ) where {T}
 
     # If there are no structures, then there is no frequency shift ω
+    (; circles) = domain
     isempty(circles) && return zero(eltype(x))
 
     constants = OmegaDerivedConstants(p)
@@ -250,14 +320,14 @@ function omega(
 end
 
 # Calculate ω(x) by searching for the region which `x` is contained in
-function omega(
+function omegamap(
     x::SVector{2, T},
     p::TissueParameters{T},
-    annulii::Vector{Annulus{2, T}},
-    spheres::Vector{Circle{3, T}},
+    domain::MyelinDomain{T},
 ) where {T}
 
     # If there are no structures, then there is no frequency shift ω
+    (; annulii, spheres) = domain
     isempty(annulii) && isempty(spheres) && return zero(eltype(x))
 
     constants = OmegaDerivedConstants(p)
@@ -298,7 +368,7 @@ function omega(
 
     # Add contributions from ferritin spheres
     @inbounds for i in eachindex(spheres)
-        x3D = SVector{3, T}(x[1], x[2], zero(T)) # pad to 3D
+        x3D = liftdim(x) # pad to 3D
         ω += x3D ∈ spheres[i] ?
              omega_ferritin_inside(x3D, p, constants, spheres[i]) :
              omega_ferritin_outside(x3D, p, constants, spheres[i])
@@ -307,21 +377,86 @@ function omega(
     return ω
 end
 
-# Individual coordinate input
-omega(x::T, y::T, p::TissueParameters{T}, annulii::Vector{Annulus{2, T}}, spheres::Vector{Circle{3, T}}) where {T} = omega(SVector{2, T}((x, y)), p, annulii, spheres)
-omega(x::T, y::T, p::TissueParameters{T}, domain::MyelinDomain{T}) where {T} = omega(x, y, p, domain.annulii, domain.ferritins)
+omegamap(x::T, y::T, p::TissueParameters{T}, domain::AbstractDomain{T}) where {T} = omegamap(SVector{2, T}((x, y)), p, domain)
 
-omega(x::T, y::T, p::TissueParameters{T}, circles::Vector{Circle{2, T}}) where {T} = omega(SVector{2, T}((x, y)), p, circles)
-omega(x::T, y::T, p::TissueParameters{T}, domain::BloodVesselDomain{T}) where {T} = omega(x, y, p, domain.circles)
-
-function omega(x::AbstractVector{T}, y::AbstractVector{T}, p::TissueParameters{T}, args...) where {T}
+function omegamap(x::AbstractVector{T}, y::AbstractVector{T}, p::TissueParameters{T}, domain::AbstractDomain{T}) where {T}
     ω = zeros(T, length(x), length(y))
     Threads.@threads for j in eachindex(y)
         for i in eachindex(x)
-            ω[i, j] = omega(x[i], y[j], p, args...)
+            ω[i, j] = omegamap(x[i], y[j], p, domain)
         end
     end
     return ω
+end
+
+####
+#### Map over domain by region
+####
+
+function mapdomain(f, x::AbstractVector{T}, y::AbstractVector{T}, p::TissueParameters{T}, domain::AbstractDomain{T}) where {T}
+    out = zeros(T, length(x), length(y))
+    Threads.@threads for j in eachindex(y)
+        for i in eachindex(x)
+            x⃗ = SVector{2, T}(x[i], y[j])
+            region = findregion(x⃗, domain)
+            out[i, j] = f(x⃗, p, region)
+        end
+    end
+    return out
+end
+
+function regionmap(x::AbstractVector{T}, y::AbstractVector{T}, p::TissueParameters{T}, domain::AbstractDomain{T}) where {T}
+    return mapdomain(x, y, p, domain) do _, _, region
+        return Int(region)
+    end
+end
+
+function t2map(x::AbstractVector{T}, y::AbstractVector{T}, p::TissueParameters{T}, domain::BloodVesselDomain{T}) where {T}
+    return mapdomain(x, y, p, domain) do _, p, region
+        if region == BloodRegion
+            inv(p.R2v_Blood)
+        else # region == TissueRegion
+            inv(p.R2_Tissue)
+        end
+    end
+end
+
+function t1map(x::AbstractVector{T}, y::AbstractVector{T}, p::TissueParameters{T}, domain::BloodVesselDomain{T}) where {T}
+    return mapdomain(x, y, p, domain) do _, p, region
+        if region == BloodRegion
+            inv(p.R1_Blood)
+        else # region == TissueRegion
+            inv(p.R1_Tissue)
+        end
+    end
+end
+
+function t2map(x::AbstractVector{T}, y::AbstractVector{T}, p::TissueParameters{T}, domain::MyelinDomain{T}) where {T}
+    return mapdomain(x, y, p, domain) do _, p, region
+        if region == FerritinRegion
+            inv(p.R2_Fe)
+        elseif region == TissueRegion
+            inv(p.R2_lp)
+        elseif region == AxonRegion
+            inv(p.R2_lp)
+        else # region == MyelinRegion
+            inv(p.R2_sp)
+        end
+    end
+end
+
+function t1map(x::AbstractVector{T}, y::AbstractVector{T}, p::TissueParameters{T}, domain::MyelinDomain{T}) where {T}
+    return mapdomain(x, y, p, domain) do _, p, region
+        if region == FerritinRegion
+            inv(p.R1_Fe)
+        elseif region == TissueRegion
+            inv(p.R1_lp)
+        elseif region == AxonRegion
+            inv(p.R1_lp)
+        else # region == MyelinRegion
+            inv(p.R1_sp)
+        end
+    end
 end
 
 end # module SimulatedFields
