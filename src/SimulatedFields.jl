@@ -1,10 +1,11 @@
 module SimulatedFields
 
 using Parameters: @with_kw
-using StaticArrays: SVector
-using LinearAlgebra: ⋅, dot, norm
+using StaticArrays: SA, SVector
+using LinearAlgebra: ⋅, dot, norm, normalize
 
 export BloodVesselDomain, MyelinDomain, TissueParameters
+export Region, TissueRegion, BloodRegion, MyelinRegion, AxonRegion, FerritinRegion
 export Annulus, Circle, isoverlapping
 export omegamap, t1map, t2map, regionmap, mapdomain, findregion, regiondict
 
@@ -42,21 +43,21 @@ export omegamap, t1map, t2map, regionmap, mapdomain, findregion, regiondict
     PD_sp::T           = T(0.5) # ............................................ [fraction]   Relative proton density (Myelin)
     PD_lp::T           = T(1.0) # ............................................ [fraction]   Relative proton density (Intra Extra)
     PD_Fe::T           = T(1.0) # ............................................ [fraction]   Relative proton density (Ferritin)
-    g_ratio::T         = T(0.8370) # ......................................... [um/um]      g-ratio (originally 0.71; 0.84658 for healthy, 0.8595 for MS)
-    AxonPDensity::T    = T(0.83) # ........................................... [um^2/um^2]  Axon packing density based region in white matter (Xu et al. 2017) (originally 0.83)
-    MVF::T             = T(AxonPDensity * (1 - g_ratio^2)) # ................. [um^3/um^3]  Myelin volume fraction, assuming periodic circle packing and constant g_ratio
+    g_ratio::T         = T(0.7) # ............................................ [um/um]      g-ratio (see discussion in Stikov N, Campbell JSW, Stroh T, et al. In vivo histology of the myelin g-ratio with magnetic resonance imaging. NeuroImage 2015; 118: 397–405) (previously used 0.837; 0.84658 for healthy, 0.8595 for MS)
+    axon_density::T    = T(0.83) # ........................................... [um^2/um^2]  Axon packing density based region in white matter (Xu et al. 2017)
+    MVF::T             = T(axon_density * (1 - g_ratio^2)) # ................. [um^3/um^3]  Myelin volume fraction, assuming periodic circle packing and constant g_ratio
     MWF::T             = T(PD_sp * MVF / (PD_lp - (PD_lp - PD_sp) * MVF)) # .. [fraction]   Myelin water fraction, assuming periodic circle packing and constant g_ratio
     MyelinChiI::T      = T(-60e-9) # ......................................... [T/T]        Isotropic susceptibility of myelin; Wharton and Bowtell 2012 find -60 ppb ± 20 ppb in Table 2, Xu et al. 2017 use the same value.
     MyelinChiA::T      = T(-140e-9) # ........................................ [T/T]        Anisotropic Susceptibility of myelin; Wharton and Bowtell 2012 find -140 ppb ± 20 ppb in Table 2, Xu et al. 2017 use a slightly different value of -120 ppb.
     MyelinChiE::T      = T(0.0) # ............................................ [T/T]        Exchange component to resonance freqeuency; we default to 0.0, but Wharton and Bowtell 2012 find 20 ppb ± 10 ppb and 50 ppb ± 10 ppb in Table 2.
     R2_Fe::T           = T(inv(1e-6)) # ...................................... [1/s]        R2 relation rate of iron in ferritin (assumed extremely high) #TODO Ref
     R1_Fe::T           = T(inv(1e-6)) # ...................................... [1/s]        R1 relation rate of iron in ferritin (assumed extremely high) #TODO Ref
-    R_Ferritin::T      = T(4.0e-3) # ......................................... [um]         Ferritin mean radius
+    R_Ferritin::T      = T(4.0e-3) # ......................................... [um]         Ferritin mean radius (Harrison PM, Arosio P. The ferritins: molecular properties, iron storage function and cellular regulation. Biochimica et Biophysica Acta (BBA) - Bioenergetics 1996; 1275: 161–203.)
     Fe_Conc::T         = T(0.0424) # ......................................... [g/g]        TODO: (check units) Concentration of iron in the frontal white matter (0.0424 in frontal WM; 0.2130 in globus pallidus deep grey matter)
     Rho_Tissue::T      = T(1.073) # .......................................... [g/ml]       White matter tissue density
     Chi_Tissue::T      = T(-9.05e-6) # ....................................... [T/T]        Isotropic susceptibility of tissue
     Chi_FeUnit::T      = T(1.4e-9) # ......................................... [g/g]        TODO: (check units) Susceptibility of iron per ppm/(ug/g) weight fraction of iron.
-    Chi_FeFull::T      = T(520.0e-6) # ....................................... [T/T]        Susceptibility of iron for ferritin particle FULLY loaded with 4500 iron atoms. (use volume of FULL spheres) (from Contributions to magnetic susceptibility)
+    Chi_FeFull::T      = T(520.0e-6) # ....................................... [T/T]        Susceptibility of iron for ferritin particle FULLY loaded with 4500 iron atoms; use volume of FULL spheres. (Contributions to magnetic susceptibility of brain tissue - Duyn - 2017 - NMR in Biomedicine - Wiley Online Library, https://analyticalsciencejournals.onlinelibrary.wiley.com/doi/abs/10.1002/nbm.3546)
     Rho_Fe::T          = T(7.874) # .......................................... [g/cm^3]     Iron density
     Hct_Blood::T       = T(0.44) # ........................................... [fraction]   Hematocrit fraction
     Yv_Blood::T        = T(0.61) # ........................................... [fraction]   Venous Blood Oxygenation
@@ -79,7 +80,7 @@ export omegamap, t1map, t2map, regionmap, mapdomain, findregion, regiondict
     @assert K_perm ≈ K_Axon_Sheath   # different permeabilities not implemented
     @assert K_perm ≈ K_Tissue_Sheath # different permeabilities not implemented
     @assert R_scale ≈ R_mu / R_shape
-    @assert MVF ≈ AxonPDensity * (1 - g_ratio^2)
+    @assert MVF ≈ axon_density * (1 - g_ratio^2)
     @assert MWF ≈ PD_sp * MVF / (PD_lp - (PD_lp - PD_sp) * MVF)
 end
 
@@ -89,6 +90,7 @@ Base.Dict(p::TissueParameters{T}) where {T} = Dict{String, T}(string(k) => getfi
 #### Geometry utils
 ####
 
+norm2(x::SVector{dim, T}) where {dim, T} = x ⋅ x
 liftdim(x::SVector{dim, T}) where {dim, T} = SVector{dim + 1, T}(x..., zero(T))
 
 @with_kw struct Circle{dim, T}
@@ -100,7 +102,7 @@ end
 
 @inline function Base.in(x::SVector{dim, T}, circle::Circle{dim, T}, thresh::T = zero(T)) where {dim, T}
     dx = x - centre(circle)
-    return dx ⋅ dx <= (radius(circle) + thresh)^2
+    return norm2(dx) <= (radius(circle) + thresh)^2
 end
 
 @with_kw struct Annulus{dim, T}
@@ -118,12 +120,185 @@ end
 @inline function Base.in(x::SVector{dim, T}, annulus::Annulus{dim, T}, thresh::T = zero(T)) where {dim, T}
     ri, ro = radii(annulus)
     dx = x - centre(annulus)
-    return (ri - thresh)^2 <= dx ⋅ dx <= (ro + thresh)^2
+    return (ri - thresh)^2 <= norm2(dx) <= (ro + thresh)^2
 end
 
 @inline function isoverlapping(a::Annulus{dim, T}, b::Annulus{dim, T}, thresh::T = zero(T)) where {dim, T}
     dx = centre(a) - centre(b)
-    return dx ⋅ dx <= (outer_radius(a) + outer_radius(b) - thresh)^2
+    return norm2(dx) <= (outer_radius(a) + outer_radius(b) - thresh)^2
+end
+
+function area_weighted_mean(circles::Vector{Circle{2, T}}) where {T}
+    μ = SA[zero(T), zero(T)]
+    Σr² = zero(T)
+    for c in circles
+        Σr² += radius(c)^2
+        μ += centre(c) * radius(c)^2
+    end
+    return μ / Σr²
+end
+
+####
+#### Greedy circle packing
+####
+
+function solve_triangle(a::T, b::T, c::T) where {T}
+    # Given three prescribed sidelengths of a triangle (a, b, c) and two prescribed points P1 = (0, 0) and P2 = (a, 0),
+    # return the two solutions for the third point P3 = (x, y) and P4 = (x, -y).
+    x = (a^2 - b^2 + c^2) / (2 * a)
+    y = √((-a + b + c) * (a - b + c) * (a + b - c) * (a + b + c)) / (2 * a)
+    return SA[x, y], SA[x, -y]
+end
+
+function tangent_circles(c1::Circle{2, T}, c2::Circle{2, T}, new_radius::T, min_separation::T = zero(T)) where {T}
+    # Given two circles `c1` and `c2`, return the two circles that are tangent to both `c1` and `c2` (up to `min_separation` distance).
+    dx = centre(c2) - centre(c1)
+    d12 = norm(dx)
+    d23 = radius(c2) + new_radius + min_separation
+    d32 = new_radius + radius(c1) + min_separation
+
+    # Compute new tangent circles `c1` and `c2` are close enough, otherwise return `nothing`
+    d12 >= d23 + d32 && return nothing
+    new_rel_centre1, new_rel_centre2 = solve_triangle(d12, d23, d32)
+
+    # Affine transformation to rotate and translate the new circles to the correct position
+    cosϕ, sinϕ = dx[1] / d12, dx[2] / d12
+    R = SA[cosϕ -sinϕ; sinϕ cosϕ]
+    new_centre1 = centre(c1) + R * new_rel_centre1
+    new_centre2 = centre(c1) + R * new_rel_centre2
+
+    return Circle(new_centre1, new_radius), Circle(new_centre2, new_radius)
+end
+
+function packing_energy(circles::Vector{Circle{2, T}}, new_circle::Circle{2, T}) where {T}
+    # Packing energy is sum of squared distances from each circle centre
+    energy = zero(T)
+    x⃗ = centre(new_circle)
+    for c in circles
+        dx = x⃗ - centre(c)
+        energy += norm2(dx)
+    end
+    return energy
+end
+
+function signed_overlap_distance(c1::Circle{2, T}, c2::Circle{2, T}, min_separation::T = zero(T)) where {T}
+    dx = centre(c1) - centre(c2)
+    return norm2(dx) - (radius(c1) + radius(c2) + min_separation)^2
+end
+
+#=
+using NLopt: NLopt
+using ForwardDiff: ForwardDiff, DiffResults
+
+function greedy_insert_circle_opt(
+    circles::Vector{Circle{2, Float64}},
+    new_radius::Float64,
+    min_separation::Float64 = 0.0,
+)
+
+    function packing_energy_opt(x::Vector{Float64})
+        # Packing energy is sum of squared distances from each circle centre
+        new_circle = Circle(SA[x[1], x[2]], new_radius)
+        return packing_energy(circles, new_circle)
+    end
+
+    function signed_overlap_constraint(x::Vector{Float64}, c::Circle{2, Float64})
+        # Constrain the new circle to be at least `min_separation` distance from the circle `c`
+        new_circle = Circle(SA[x[1], x[2]], new_radius)
+        return -signed_overlap_distance(new_circle, c, min_separation) # constraint is *negative* when satisfied
+    end
+
+    function nlopt_grad(f, x::Vector{Float64}, grad::Vector{Float64})
+        if length(grad) > 0
+            res = DiffResults.DiffResult(0.0, grad)
+            ForwardDiff.gradient!(res, f, x)
+            return DiffResults.value(res)
+        else
+            return f(x)
+        end
+    end
+
+    optfun(x::Vector, grad::Vector) = nlopt_grad(packing_energy, x, grad)
+    constraintfun(x::Vector, grad::Vector, c::Circle) = nlopt_grad(y -> signed_overlap_constraint(y, c), x, grad)
+
+    opt = NLopt.Opt(:LD_MMA, 2)
+    opt.xtol_rel = 1e-4
+    opt.maxeval = 100
+    opt.min_objective = optfun
+    for c in circles
+        NLopt.inequality_constraint!(opt, (x, g) -> constraintfun(x, g, c), 0.0)
+    end
+
+    while true
+        μ0 = Vector(area_weighted_mean(circles)) # mean of existing centres
+        r0 = sum([radius.(circles); new_radius] .+ min_separation / 2) # enclosing radius
+        x0 = μ0 + 1 * r0 * normalize(randn(2)) # initial guess
+        (minf, minx, ret) = NLopt.optimize(opt, x0)
+
+        ret === :MAXEVAL_REACHED && continue
+        return Circle(SA[minx[1], minx[2]], new_radius)
+    end
+end
+=#
+
+function greedy_insert_circle_brute(
+    circles::Vector{Circle{2, T}},
+    new_radius::T,
+    min_separation::T = zero(T),
+) where {T}
+    if isempty(circles)
+        # Place first circle at origin
+        return Circle(SA[zero(T), zero(T)], new_radius)
+    end
+
+    if length(circles) == 1
+        # Place second circle at random angle, tangent to first circle
+        ϕ = 2 * T(π) * rand(T)
+        new_centre = centre(circles[1]) + (radius(circles[1]) + new_radius + min_separation) * SA[cos(ϕ), sin(ϕ)]
+        return Circle(new_centre, new_radius)
+    end
+
+    # Brute force search for the best position
+    best_energy = T(Inf)
+    best_circle = Circle(SA[T(Inf), T(Inf)], new_radius)
+    for i in 2:length(circles), j in 1:i-1
+        # New candidate circles are tangent to ci and cj
+        ci, cj = circles[i], circles[j]
+        new_circles = tangent_circles(ci, cj, new_radius, min_separation)
+        new_circles === nothing && continue
+
+        # Check if the new circles are not overlapping with existing circles
+        new_circle1, new_circle2 = new_circles
+        if minimum(signed_overlap_distance(new_circle1, circles[k], min_separation) for k in 1:length(circles) if k != i && k != j; init = T(Inf)) >= 0
+            packing_energy1 = packing_energy(circles, new_circle1)
+            packing_energy1 < best_energy && ((best_energy, best_circle) = (packing_energy1, new_circle1))
+        end
+        if minimum(signed_overlap_distance(new_circle2, circles[k], min_separation) for k in 1:length(circles) if k != i && k != j; init = T(Inf)) >= 0
+            packing_energy2 = packing_energy(circles, new_circle2)
+            packing_energy2 < best_energy && ((best_energy, best_circle) = (packing_energy2, new_circle2))
+        end
+    end
+
+    return best_circle
+end
+
+function greedy_circle_packing(radii::Vector{Float64}; min_separation::Float64 = 0.0)
+    isempty(radii) && return Circle{2, Float64}[]
+
+    # Greedily pack circles on at a time, placing the first circle at the origin
+    circles = [Circle(SA[0.0, 0.0], radii[1])]
+    for i in 2:length(radii)
+        new_circle = greedy_insert_circle_brute(circles, radii[i], min_separation)
+        push!(circles, new_circle)
+    end
+
+    # Translate circles such that the area-weighted mean is at the origin
+    μ = area_weighted_mean(circles)
+    for i in eachindex(circles)
+        circles[i] = Circle(centre(circles[i]) - μ, radius(circles[i]))
+    end
+
+    return circles
 end
 
 ####
@@ -145,7 +320,7 @@ end
 
 regiondict() = Dict{String, Int}(string(r) => Int(r) for r in [AxonRegion, BloodRegion, MyelinRegion, TissueRegion, FerritinRegion])
 
-findregion(x::T, y::T, domain::AbstractDomain{T}) where {T} = findregion(SVector{2, T}((x, y)), domain)
+findregion(x::T, y::T, domain::AbstractDomain{T}) where {T} = findregion(SA{T}[x, y], domain)
 
 function findregion(x::SVector{2, T}, domain::BloodVesselDomain{T}) where {T}
     # Find the region that `x` is in
@@ -153,8 +328,8 @@ function findregion(x::SVector{2, T}, domain::BloodVesselDomain{T}) where {T}
     i_inner = findfirst(c -> x ∈ c, circles)
 
     region = i_inner !== nothing ?
-        BloodRegion : # in circle -> blood region
-        TissueRegion # not in circle -> tissue region
+             BloodRegion : # in circle -> blood region
+             TissueRegion # not in circle -> tissue region
 
     return region
 end
@@ -195,7 +370,7 @@ end
 #   - Cartesian coordinates (z, y, x) -> (x, y, z) (not entirely sure about this...)
 #   - ρ² = y² + z² -> ρ² = x² + y²
 #   - θ = angle between cylinder and B-field -> same θ here
-#   - θ3D = azimuthal angle between y and z -> ϕ3D = azimuthal angle between x and y
+#   - θ3D = "azimuthal angle in the spherical coordinate system and r² ≡ x² + y² + z²", defined by cos(θ3D) = z / r when B⃗₀ = B₀ ẑ -> θ = angle between B⃗ and r⃗ (position relative to sphere origin), defined by cos(θ) = B̂ ⋅ r̂
 #   - φ = 2D polar angle between y and z -> ϕ = 2D polar angle between x and y
 #
 # [1] Cheng Y-CN, Neelavalli J, Haacke EM. Limitations of Calculating Field Distributions and Magnetic Susceptibilities in MRI using a Fourier Based Method. Phys Med Biol 2009; 54: 1169–1189
@@ -217,7 +392,7 @@ end
 function omega_blood_tissue(x::SVector{2, T}, p::TissueParameters{T}, b::OmegaDerivedConstants{T}, c::Circle{2, T}) where {T}
     χv, a² = p.dChiv_Blood, radius(c)^2
     dx = x - centre(c)
-    r² = dx ⋅ dx
+    r² = norm2(dx)
     cos2ϕ = (dx[1] - dx[2]) * (dx[1] + dx[2]) / r² # cos2ϕ = (x² - y²) / r² = (x - y) * (x + y) / r²
     return b.ω₀ * χv * b.s² * (a² / r²) * cos2ϕ / 2
 end
@@ -230,7 +405,7 @@ end
 @inline function omega_myelin_tissue(x::SVector{2, T}, p::TissueParameters{T}, b::OmegaDerivedConstants{T}, c_in::Circle{2, T}, c_out::Circle{2, T}) where {T}
     χI, χA, ri, ro = p.MyelinChiI, p.MyelinChiA, radius(c_in), radius(c_out)
     dx = x - centre(c_in)
-    r² = dx ⋅ dx
+    r² = norm2(dx)
     cos2ϕ = (dx[1] - dx[2]) * (dx[1] + dx[2]) / r² # cos2ϕ = (x² - y²) / r² = (x - y) * (x + y) / r²
     tmp = b.s² * cos2ϕ * ((ro - ri) * (ro + ri) / r²)
     I = χI / 2 * tmp # isotropic component
@@ -242,7 +417,7 @@ end
 @inline function omega_myelin(x::SVector{2, T}, p::TissueParameters{T}, b::OmegaDerivedConstants{T}, c_in::Circle{2, T}, c_out::Circle{2, T}) where {T}
     χI, χA, E, ri², ro = p.MyelinChiI, p.MyelinChiA, p.MyelinChiE, radius(c_in)^2, radius(c_out)
     dx = x - centre(c_in)
-    r² = dx ⋅ dx
+    r² = norm2(dx)
     r = √r²
     cos2ϕ = (dx[1] - dx[2]) * (dx[1] + dx[2]) / r² # cos2ϕ == (x²-y²)/r² == (x-y)*(x+y)/r²
     I = χI * (b.c² - T(1) / 3 - b.s² * cos2ϕ * (ri² / r²)) / 2 # isotropic component
@@ -261,19 +436,68 @@ end
 @inline function omega_ferritin_outside(x::SVector{3, T}, p::TissueParameters{T}, b::OmegaDerivedConstants{T}, c::Circle{3, T}) where {T}
     χ, a = p.Chi_FeFull, radius(c)
     dx = x - centre(c)
-    r = norm(dx) # 3D radius: r = √(x²+y²+z²)
-    Bx̂ = SVector{3, T}(one(T), zero(T), zero(T)) # perpendicular to B₀ (x-dir in both reference frames)
-    Bŷ = SVector{3, T}(zero(T), b.c, -b.s) # perpendicular to B₀ (y-dir in it's reference frame)
-    Bẑ = SVector{3, T}(zero(T), b.s, b.c) # magnetic field direction (z-dir in it's reference frame)
-    dx′ = SVector{3, T}(Bx̂ ⋅ dx, Bŷ ⋅ dx, Bẑ ⋅ dx) # dx rotated into (Bx̂, Bŷ, Bẑ) reference frame
-    r²_perp = dx′[1]^2 + dx′[3]^2 # Bx̂-Bẑ plane radius
-    cos²ϕ3D = ifelse(r²_perp == 0, zero(T), dx′[1]^2 / r²_perp) # azimuthal angle in Bx̂-Bẑ plane: cosϕ = x/√(x²+z²) (note: limit as r²_perp → 0 is undefined, can be any number in [0,1] depending how you take the limit; arbitrarily choose 0)
-    A = (χ / 3) * (3 * cos²ϕ3D - 1) * (a / r)^3 # field outside a sphere of constant susceptibility (Cheng Y-CN, Neelavalli J, Haacke EM. Limitations of Calculating Field Distributions and Magnetic Susceptibilities in MRI using a Fourier Based Method. Phys Med Biol 2009; 54: 1169–1189)
+    r = norm(dx)
+    r̂ = dx / r
+    B̂ = SA{T}[zero(T), b.s, b.c] # magnetic field direction
+    cos²θ = (B̂ ⋅ r̂)^2 # polar angle with respect to B̂ is defined by cosθ = B̂ ⋅ r̂
+    A = (χ / 3) * (3 * cos²θ - 1) * (a / r)^3 # field outside a sphere of constant susceptibility (Cheng Y-CN, Neelavalli J, Haacke EM. Limitations of Calculating Field Distributions and Magnetic Susceptibilities in MRI using a Fourier Based Method. Phys Med Biol 2009; 54: 1169–1189)
     return b.ω₀ * A
 end
 
 @inline function omega_ferritin_inside(x::SVector{3, T}, p::TissueParameters{T}, b::OmegaDerivedConstants{T}, c::Circle{3, T}) where {T}
     return zero(T) # no field inside a sphere of constant susceptibility
+end
+
+#### Analytic extremal values of the local frequency perturbation. Does not depend on size of respect structures (vessel/myelin/sphere inner/outer radii), but assumes only one structure is present.
+
+function omega_blood_analytic_extremes(p::TissueParameters{T}) where {T}
+    γ, B₀, θ = p.gamma, p.B0, p.theta
+    χ = p.dChiv_Blood
+    ω₀ = γ * B₀
+    s, c = sincos(θ)
+    ω_inside = ω₀ * χ * (3 * c^2 - 1) / 6 # constant within vessel `ω_inside`
+    ω_outside = ω₀ * χ * s^2 / 2 # dipolar oscillation outside vessel bounded by `ω_outside`
+    ω_extremes = (ω_inside, -ω_outside, ω_outside)
+    return (; min = min(ω_extremes...), max = max(ω_extremes...))
+end
+
+function omega_myelin_analytic_extremes(p::TissueParameters{T}) where {T}
+    γ, B₀, θ = p.gamma, p.B0, p.theta
+    χI, χA, g = p.MyelinChiI, p.MyelinChiA, p.g_ratio
+    ω₀ = γ * B₀
+    s, c = sincos(θ)
+
+    # For the annulus, we need to consider four permutations of possible extremal coordinates: r ∈ {r_inner, r_outer} and ϕ ∈ {0°, 90°}
+    ωA_annulusᵢ₊ = ω₀ * χA * (s^2 * (T(-5 // 12) - T(+1 // 8) * 2 + T(3 // 4) * -log(g)) - c^2 / 6) # isotropic component with ϕ = 0° -> cos2ϕ = +1, r = r_inner
+    ωA_annulusᵢ₋ = ω₀ * χA * (s^2 * (T(-5 // 12) - T(-1 // 8) * 2 + T(3 // 4) * -log(g)) - c^2 / 6) # isotropic component with ϕ = 90° -> cos2ϕ = -1, r = r_inner
+    ωA_annulusₒ₊ = ω₀ * χA * (s^2 * (T(-5 // 12) - T(+1 // 8) * (1 + g^2)) - c^2 / 6) # isotropic component with ϕ = 0° -> cos2ϕ = +1, r = r_outer
+    ωA_annulusₒ₋ = ω₀ * χA * (s^2 * (T(-5 // 12) - T(-1 // 8) * (1 + g^2)) - c^2 / 6) # isotropic component with ϕ = 90° -> cos2ϕ = -1, r = r_outer
+    ωI_annulusᵢ₊ = ω₀ * χI * T(1 // 2) * (c^2 - T(1 // 3) - s^2) # isotropic component with ϕ = 0° -> cos2ϕ = +1, r = r_inner
+    ωI_annulusᵢ₋ = ω₀ * χI * T(1 // 2) * (c^2 - T(1 // 3) + s^2) # isotropic component with ϕ = 90° -> cos2ϕ = -1, r = r_inner
+    ωI_annulusₒ₊ = ω₀ * χI * T(1 // 2) * (c^2 - T(1 // 3) - s^2 * g^2) # isotropic component with ϕ = 0° -> cos2ϕ = +1, r = r_outer
+    ωI_annulusₒ₋ = ω₀ * χI * T(1 // 2) * (c^2 - T(1 // 3) + s^2 * g^2) # isotropic component with ϕ = 90° -> cos2ϕ = -1, r = r_outer
+    ω_annulusᵢ₊ = ωA_annulusᵢ₊ + ωI_annulusᵢ₊ # total field in annulus with ϕ = 0° -> cos2ϕ = +1, r = r_inner
+    ω_annulusᵢ₋ = ωA_annulusᵢ₋ + ωI_annulusᵢ₋ # total field in annulus with ϕ = 90° -> cos2ϕ = -1, r = r_inner
+    ω_annulusₒ₊ = ωA_annulusₒ₊ + ωI_annulusₒ₊ # total field in annulus with ϕ = 0° -> cos2ϕ = +1, r = r_outer
+    ω_annulusₒ₋ = ωA_annulusₒ₋ + ωI_annulusₒ₋ # total field in annulus with ϕ = 90° -> cos2ϕ = -1, r = r_outer
+
+    # The inner field is constant and the outer field is bounded by the dipolar oscillation
+    ω_inside = ω₀ * χA * T(3 // 4) * s^2 * -log(g) # constant within myelin sheath (note: -log(g) > 0)
+    ω_outside = ω₀ * (χI / 2 + χA / 8) * s^2 * (1 - g^2) # dipolar oscillation outside myelin sheath bounded by `ω_outside`
+
+    ω_extremes = (ω_inside, -ω_outside, ω_outside, ω_annulusᵢ₊, ω_annulusᵢ₋, ω_annulusₒ₊, ω_annulusₒ₋)
+    return (; min = min(ω_extremes...), max = max(ω_extremes...))
+end
+
+function omega_ferritin_analytic_extremes(p::TissueParameters{T}) where {T}
+    γ, B₀ = p.gamma, p.B0
+    χ = p.Chi_FeFull
+    ω₀ = γ * B₀
+    ω_inside = zero(T) # constant zero within sphere
+    ω_outside₊ = ω₀ * χ * T(2 // 3) # maximum field occurs when position on sphere surface relative to sphere centre is parallel to B⃗
+    ω_outside₋ = ω₀ * χ * T(-1 // 3) # minimum field occurs when position on sphere surface relative to sphere centre is perpendicular to B⃗
+    ω_extremes = (ω_inside, ω_outside₋, ω_outside₊)
+    return (; min = min(ω_extremes...), max = max(ω_extremes...))
 end
 
 ####
@@ -377,7 +601,7 @@ function omegamap(
     return ω
 end
 
-omegamap(x::T, y::T, p::TissueParameters{T}, domain::AbstractDomain{T}) where {T} = omegamap(SVector{2, T}((x, y)), p, domain)
+omegamap(x::T, y::T, p::TissueParameters{T}, domain::AbstractDomain{T}) where {T} = omegamap(SA{T}[x, y], p, domain)
 
 function omegamap(x::AbstractVector{T}, y::AbstractVector{T}, p::TissueParameters{T}, domain::AbstractDomain{T}) where {T}
     ω = zeros(T, length(x), length(y))
@@ -397,7 +621,7 @@ function mapdomain(f, x::AbstractVector{T}, y::AbstractVector{T}, p::TissueParam
     out = zeros(T, length(x), length(y))
     Threads.@threads for j in eachindex(y)
         for i in eachindex(x)
-            x⃗ = SVector{2, T}(x[i], y[j])
+            x⃗ = SA{T}[x[i], y[j]]
             region = findregion(x⃗, domain)
             out[i, j] = f(x⃗, p, region)
         end

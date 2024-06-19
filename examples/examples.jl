@@ -2,7 +2,8 @@ using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
 
 using SimulatedFields
-using SimulatedFields: Circle, centre, inner_circle, outer_circle
+using SimulatedFields: Circle, centre, inner_circle, outer_circle, greedy_circle_packing
+using SimulatedFields: omega_blood_analytic_extremes, omega_ferritin_analytic_extremes, omega_myelin_analytic_extremes
 
 using CairoMakie
 using Dates
@@ -12,6 +13,7 @@ using LaTeXStrings
 using MAT
 using Random
 using StaticArrays
+using LinearAlgebra
 
 set_theme!(theme_latexfonts())
 
@@ -21,27 +23,35 @@ function rand_myelin_radii(p::TissueParameters, n...)
     return rand(Gamma(p.R_shape, p.R_scale), n...)
 end
 
-function rand_nonoverlapping_annulii(p::TissueParameters{T}; n = 10, width = 2.0, nattempts = 1000) where {T}
+function rand_nonoverlapping_annulii(p::TissueParameters{T}; n = 10, width = 1.0, nattempts = 1000, nsample = 10_000) where {T}
     annulii = Vector{Annulus{2, T}}(undef, n)
     n <= 0 && return annulii
-    for _ in 1:nattempts
-        for i in 1:n
-            centre = SA[rand(Uniform(-T(width) / 2, T(width) / 2)), rand(Uniform(-T(width) / 2, T(width) / 2))]
-            radius = rand_myelin_radii(p)
-            annulii[i] = Annulus(; centre, radius, g_ratio = p.g_ratio)
+
+    for attempt in 1:nattempts
+        circles = greedy_circle_packing(rand_myelin_radii(p, n); min_separation = 0.05)
+        for (i, c) in enumerate(circles)
+            annulii[i] = Annulus(; centre = c.centre, radius = c.radius, g_ratio = p.g_ratio)
         end
         any(isoverlapping(annulii[i], annulii[j]) for i in 1:n for j in i+1:n) && continue
-        density = mean(1:10_000) do i
+
+        axon_density = mvf = zero(T)
+        for i in 1:nsample
             x = SA[rand(Uniform(-T(width) / 2, T(width) / 2)), rand(Uniform(-T(width) / 2, T(width) / 2))]
-            return any(x ∈ outer_circle(annulus) for annulus in annulii)
+            for annulus in annulii
+                in_inner, in_outer = x ∈ inner_circle(annulus), x ∈ outer_circle(annulus)
+                axon_density += in_outer / nsample
+                mvf += (in_outer && !in_inner) / nsample
+            end
         end
-        density < 0.65 && continue
+        # (axon_density < p.axon_density || mvf < p.MVF) && continue
+
+        @info "Generated non-overlapping annulii after $attempt attempts with axon density ≈ $axon_density and MVF ≈ $mvf"
         return annulii
     end
     return error("Failed to generate non-overlapping annulii after $nattempts attempts")
 end
 
-function rand_ferritin_spheres(p::TissueParameters{T}; n = 10, width = 2.0, nattempts = 1000) where {T}
+function rand_ferritin_spheres(p::TissueParameters{T}; n = 10, width = 1.0, nattempts = 1000) where {T}
     spheres = Vector{Circle{3, T}}(undef, n)
     n <= 0 && return spheres
     for _ in 1:nattempts
@@ -55,7 +65,7 @@ function rand_ferritin_spheres(p::TissueParameters{T}; n = 10, width = 2.0, natt
     return spheres
 end
 
-function myelin_plot(; width = 1.2, ngrid = 4096, theta = 0.0, nmyelin = 5, nferritin = 3, randmyelin = nmyelin > 1, randferritin = nferritin > 1, nattempts = 100_000_000, units = "rad/s", save = true, plot = true, ext = ".png", kwargs...)
+function myelin_plot(; width = 1.0, ngrid = 4096, theta = 0.0, nmyelin = 5, nferritin = 3, randmyelin = nmyelin > 1, randferritin = nferritin > 1, nattempts = 100_000_000, units = "rad/s", save = true, plot = true, ext = ".png", kwargs...)
     @assert ispow2(ngrid) "ngrid must be a power of 2"
     x = range(-width / 2, width / 2; length = ngrid)
     y = range(-width / 2, width / 2; length = ngrid)
@@ -78,6 +88,8 @@ function myelin_plot(; width = 1.2, ngrid = 4096, theta = 0.0, nmyelin = 5, nfer
     ω_myelin = omegamap(x, y, p, myelindomain)
     ω_ferritin = omegamap(x, y, p, ferritindomain)
     ω_total = ω_myelin .+ ω_ferritin
+
+    @info "Field stats" extrema(ω_myelin) extrema(ω_ferritin) extrema(ω_total) omega_myelin_analytic_extremes(p) omega_ferritin_analytic_extremes(p)
 
     region_myelin = regionmap(x, y, p, myelindomain)
     t1_myelin = t1map(x, y, p, myelindomain)
@@ -107,8 +119,8 @@ function myelin_plot(; width = 1.2, ngrid = 4096, theta = 0.0, nmyelin = 5, nfer
     ax3 = Axis(mosaic[2, 1]; aspect = 1.0, title = L"$T_1$ [s]", xlabel = "x [μm]", ylabel = "y [μm]")
     hm3 = heatmap!(ax3, x, y, nferritin == 0 ? t1_myelin : t1_ferritin; colormap = :jet)
     Colorbar(mosaic[2, 2], hm3)
-    ax4 = Axis(mosaic[2, 3]; aspect = 1.0, title = L"$T_2$ [s]", xlabel = "x [μm]")
-    hm4 = heatmap!(ax4, x, y, nferritin == 0 ? t2_myelin : t2_ferritin; colormap = :jet)
+    ax4 = Axis(mosaic[2, 3]; aspect = 1.0, title = L"$T_2$ [ms]", xlabel = "x [μm]")
+    hm4 = heatmap!(ax4, x, y, 1000 .* (nferritin == 0 ? t2_myelin : t2_ferritin); colormap = :jet)
     Colorbar(mosaic[2, 4], hm4)
     plot && display(mosaic)
 
@@ -175,6 +187,8 @@ function vessel_plot(; width = 1.0, ngrid = 4096, theta = 0.0, radius = 0.1, uni
     t2_vessel = t2map(x, y, p, blooddomain)
     region_vessel = regionmap(x, y, p, blooddomain)
 
+    @info "Field stats" extrema(ω_vessel) omega_blood_analytic_extremes(p)
+
     ω_bounds = maximum(abs, ω_vessel) .* (-1, 1) # extrema(ω_vessel)
     ω_rescale = lowercase(units) == "hz" ? 2π : 1.0
     ω_clamped = clamp.(ω_vessel, ω_bounds...)
@@ -196,8 +210,8 @@ function vessel_plot(; width = 1.0, ngrid = 4096, theta = 0.0, radius = 0.1, uni
     ax3 = Axis(mosaic[2, 1]; aspect = 1.0, title = L"$T_1$ [s]", xlabel = "x [mm]", ylabel = "y [mm]")
     hm3 = heatmap!(ax3, x, y, t1_vessel; colormap = :jet)
     Colorbar(mosaic[2, 2], hm3)
-    ax4 = Axis(mosaic[2, 3]; aspect = 1.0, title = L"$T_2$ [s]", xlabel = "x [mm]")
-    hm4 = heatmap!(ax4, x, y, t2_vessel; colormap = :jet)
+    ax4 = Axis(mosaic[2, 3]; aspect = 1.0, title = L"$T_2$ [ms]", xlabel = "x [mm]")
+    hm4 = heatmap!(ax4, x, y, 1000 .* t2_vessel; colormap = :jet)
     Colorbar(mosaic[2, 4], hm4)
     plot && display(mosaic)
 
@@ -230,7 +244,7 @@ function vessel_plot(; width = 1.0, ngrid = 4096, theta = 0.0, radius = 0.1, uni
     return nothing
 end
 
-function make_plots(; seed = 30, save = true, plot = true)
+function make_plots(; seed = 77, save = true, plot = true)
     # Vessel plot
     for theta in 0:10:90
         vessel_plot(; width = 1.0, theta, radius = 0.1, save, plot)
@@ -239,7 +253,7 @@ function make_plots(; seed = 30, save = true, plot = true)
     # Myelin plots
     for theta in 0:10:90
         Random.seed!(seed)
-        myelin_plot(; width = 1.0, theta, nmyelin = 4, nferritin = 0, save, plot)
+        myelin_plot(; width = 2.5, theta, nmyelin = 25, nferritin = 0, g_ratio = 0.8, save, plot)
     end
 
     # Ferritin plot
