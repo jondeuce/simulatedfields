@@ -175,11 +175,11 @@ function myelin_plot(; width = 1.0, ngrid = 4096, theta = 0.0, nmyelin = 5, nfer
     return nothing
 end
 
-function vessel_plot(; width = 1.0, ngrid = 4096, theta = 0.0, radius = 0.1, units = "rad/s", save = true, plot = true, ext = ".png")
+function vessel_plot(; width = 1.0, ngrid = 4096, theta = 0.0, radius = 0.1, units = "rad/s", save = true, plot = true, ext = ".png", kwargs...)
     @assert ispow2(ngrid) "ngrid must be a power of 2"
     x = range(-width / 2, width / 2; length = ngrid)
     y = range(-width / 2, width / 2; length = ngrid)
-    p = TissueParameters{Float64}(; theta = deg2rad(theta))
+    p = TissueParameters{Float64}(; theta = deg2rad(theta), kwargs...)
 
     blooddomain = BloodVesselDomain([Circle{2, Float64}(; centre = SA[0.0, 0.0], radius = radius)])
     ω_vessel = omegamap(x, y, p, blooddomain)
@@ -244,7 +244,7 @@ function vessel_plot(; width = 1.0, ngrid = 4096, theta = 0.0, radius = 0.1, uni
     return nothing
 end
 
-function make_plots(; seed = 77, save = true, plot = true)
+function make_plots(; seed = 77, save = false, plot = true)
     # Vessel plot
     for theta in 0:10:90
         vessel_plot(; width = 1.0, theta, radius = 0.1, save, plot)

@@ -67,10 +67,12 @@ export omegamap, t1map, t2map, regionmap, mapdomain, findregion, regiondict
     dChiv_Blood::T     = T(2.26e-6 * Hct_Blood * (1 - Yv_Blood)) # ........... [T/T]        Increase in susceptibility in venous blood relative to tissue
     dChia_Blood::T     = T(2.26e-6 * Hct_Blood * (1 - Ya_Blood)) # ........... [T/T]        Increase in susceptibility in arterial blood relative to tissue
     CA_Blood::T        = T(0.0) # ............................................ [mM]         Contrast Agent concentration
-    dR2_CA_Blood::T    = T(5.2) # ............................................ [Hz/mM]      Relaxation constant of the CA
-    dChi_CA_Blood::T   = T(0.3393e-6) # ...................................... [T/T/mM]     Susceptibility CA
+    dR2_CA_Blood::T    = T(5.2) # ............................................ [Hz/mM]      Change in R2 per mM of contrast agent
+    dChi_CA_Blood::T   = T(0.3393e-6) # ...................................... [T/T/mM]     Change in susceptibility per mM of contrast agent
     R2v_Blood::T       = T(dR2v_Blood + CA_Blood * dR2_CA_Blood) # ........... [1/s]        R2 in venous blood
     R2a_Blood::T       = T(dR2a_Blood + CA_Blood * dR2_CA_Blood) # ........... [1/s]        R2 in arterial blood
+    Chiv_Blood::T      = T(dChiv_Blood + CA_Blood * dChi_CA_Blood) # ......... [T/T]        Susceptibility in venous blood relative to tissue
+    Chia_Blood::T      = T(dChia_Blood + CA_Blood * dChi_CA_Blood) # ......... [T/T]        Susceptibility in arterial blood relative to tissue
 
     # Constraints on parameters
     @assert B0 == 3.0 "Tissue parameters are only valid for B0 = 3.0 T"
@@ -390,7 +392,7 @@ struct OmegaDerivedConstants{T}
 end
 
 function omega_blood_tissue(x::SVector{2, T}, p::TissueParameters{T}, b::OmegaDerivedConstants{T}, c::Circle{2, T}) where {T}
-    χv, a² = p.dChiv_Blood, radius(c)^2
+    χv, a² = p.Chiv_Blood, radius(c)^2
     dx = x - centre(c)
     r² = norm2(dx)
     cos2ϕ = (dx[1] - dx[2]) * (dx[1] + dx[2]) / r² # cos2ϕ = (x² - y²) / r² = (x - y) * (x + y) / r²
@@ -398,7 +400,7 @@ function omega_blood_tissue(x::SVector{2, T}, p::TissueParameters{T}, b::OmegaDe
 end
 
 function omega_blood(x::SVector{2, T}, p::TissueParameters{T}, b::OmegaDerivedConstants{T}, c::Circle{2, T}) where {T}
-    χv = p.dChiv_Blood
+    χv = p.Chiv_Blood
     return b.ω₀ * χv * (3 * b.c² - 1) / 6 # constant offset within vessel
 end
 
@@ -452,7 +454,7 @@ end
 
 function omega_blood_analytic_extremes(p::TissueParameters{T}) where {T}
     γ, B₀, θ = p.gamma, p.B0, p.theta
-    χ = p.dChiv_Blood
+    χ = p.Chiv_Blood
     ω₀ = γ * B₀
     s, c = sincos(θ)
     ω_inside = ω₀ * χ * (3 * c^2 - 1) / 6 # constant within vessel `ω_inside`
